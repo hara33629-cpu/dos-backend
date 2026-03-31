@@ -89,7 +89,7 @@ def log_request():
     return jsonify({
         "message": "Request logged successfully",
         "data": log,
-        "features": features
+        "features": features,
         "decision": decision
     })
 
