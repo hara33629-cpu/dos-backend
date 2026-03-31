@@ -10,6 +10,40 @@ CORS(app)
 # In-memory storage (temporary)
 traffic_logs = []
 
+def extract_features(ip, request_size, user_agent):
+    current_time = time.time()
+
+    # Store request timestamps per IP
+    request_counts[ip].append(current_time)
+
+    # Keep only last 60 seconds data
+    request_counts[ip] = [
+        t for t in request_counts[ip] if current_time - t <= 60
+    ]
+
+    request_count = len(request_counts[ip])
+
+    # Features
+    high_request_rate = request_count > 20
+    repeated_access = request_count > 5
+    small_payload = request_size < 50
+    large_payload = request_size > 5000
+    unusual_user_agent = (
+        "bot" in user_agent.lower() or
+        "crawl" in user_agent.lower() or
+        "spider" in user_agent.lower()
+    )
+
+    return {
+        "request_count": request_count,
+        "high_request_rate": high_request_rate,
+        "repeated_access": repeated_access,
+        "small_payload": small_payload,
+        "large_payload": large_payload,
+        "unusual_user_agent": unusual_user_agent
+    }
+
+
 def get_client_ip():
     """Get real client IP (handles proxies)"""
     if request.headers.get("X-Forwarded-For"):
@@ -32,13 +66,18 @@ def log_request():
         "request_size": request_size
     }
 
+    # ✅ Extract features here
+    features = extract_features(ip, request_size, user_agent)
+
     traffic_logs.append(log)
 
     print("📥 Request Logged:", log)
+    print("⚙️ Features:", features)
 
     return jsonify({
         "message": "Request logged successfully",
-        "data": log
+        "data": log,
+        "features": features
     })
 
 @app.route("/logs", methods=["GET"])
