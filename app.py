@@ -1,3 +1,5 @@
+from collections import defaultdict
+request_counts = defaultdict(list)
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import time
