@@ -43,6 +43,17 @@ def extract_features(ip, request_size, user_agent):
         "unusual_user_agent": unusual_user_agent
     }
 
+def detect_attack(features):
+    # 🚨 Strong attack pattern
+    if features["high_request_rate"] and features["small_payload"]:
+        return "BLOCK"
+
+    # ⚠️ Suspicious behavior
+    if features["repeated_access"] or features["unusual_user_agent"]:
+        return "SUSPICIOUS"
+
+    # ✅ Normal traffic
+    return "ALLOW"
 
 def get_client_ip():
     """Get real client IP (handles proxies)"""
@@ -57,6 +68,7 @@ def log_request():
     method = request.method
     user_agent = request.headers.get("User-Agent", "unknown")
     request_size = len(request.data)
+    decision = detect_attack(features)
 
     log = {
         "ip": ip,
@@ -78,6 +90,7 @@ def log_request():
         "message": "Request logged successfully",
         "data": log,
         "features": features
+        "decision": decision
     })
 
 @app.route("/logs", methods=["GET"])
