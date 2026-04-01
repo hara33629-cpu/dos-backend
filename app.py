@@ -68,6 +68,11 @@ def log_request():
     method = request.method
     user_agent = request.headers.get("User-Agent", "unknown")
     request_size = len(request.data)
+
+    # ✅ Extract features FIRST
+    features = extract_features(ip, request_size, user_agent)
+
+    # ✅ THEN detect attack
     decision = detect_attack(features)
 
     log = {
@@ -77,10 +82,6 @@ def log_request():
         "user_agent": user_agent,
         "request_size": request_size
     }
-
-    # ✅ Extract features here
-    features = extract_features(ip, request_size, user_agent)
-    "decision": decision
 
     traffic_logs.append(log)
 
