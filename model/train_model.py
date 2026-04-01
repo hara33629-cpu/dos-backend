@@ -1,19 +1,87 @@
-# train_model.py
-
-from sklearn.neural_network import MLPClassifier
-from sklearn.preprocessing import StandardScaler
+import sqlite3
+import numpy as np
 import joblib
-from data_loader import load_data  # optional if you separate
 
-X, y = load_data()
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
 
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
+# =========================
+# LOAD DATA FROM DB
+# =========================
+conn = sqlite3.connect("traffic.db")
+cursor = conn.cursor()
 
-model = MLPClassifier(hidden_layer_sizes=(32, 16), max_iter=300)
-model.fit(X_scaled, y)
+cursor.execute("""
+SELECT 
+    request_size,
+    high_request_rate,
+    repeated_access,
+    small_payload,
+    large_payload,
+    unusual_user_agent,
+    decision
+FROM traffic_logs
+""")
 
-joblib.dump(model, "model/dnn_model.pkl")
-joblib.dump(scaler, "model/scaler.pkl")
+rows = cursor.fetchall()
+conn.close()
 
-print("✅ Model trained and saved")
+# =========================
+# PREPARE DATA
+# =========================
+X = []
+y = []
+
+label_map = {
+    "ALLOW": 1,
+    "SUSPICIOUS": 0.5,
+    "BLOCK": 0
+}
+
+for row in rows:
+    request_size, high_rate, repeated, small, large, unusual, decision = row
+
+    features = [
+        request_size,
+        int(high_rate),
+        int(repeated),
+        int(small),
+        int(large),
+        int(unusual)
+    ]
+
+    X.append(features)
+    y.append(label_map.get(decision, 0.5))
+
+X = np.array(X)
+y = np.array(y)
+
+# =========================
+# TRAIN / TEST SPLIT
+# =========================
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# =========================
+# TRAIN MODEL
+# =========================
+model = RandomForestClassifier(n_estimators=100)
+
+model.fit(X_train, y_train)
+
+# =========================
+# EVALUATE
+# =========================
+y_pred = model.predict(X_test)
+
+print("\n📊 Model Evaluation:\n")
+print(classification_report(y_test, y_pred))
+
+# =========================
+# SAVE MODEL
+# =========================
+joblib.dump(model, "model/model.pkl")
+
+print("\n✅ Model saved as model/model.pkl")
