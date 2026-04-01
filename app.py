@@ -80,6 +80,7 @@ def log_request():
 
     # ✅ Extract features here
     features = extract_features(ip, request_size, user_agent)
+    "decision": decision
 
     traffic_logs.append(log)
 
@@ -90,7 +91,6 @@ def log_request():
         "message": "Request logged successfully",
         "data": log,
         "features": features,
-        "decision": decision
     })
 
 @app.route("/logs", methods=["GET"])
