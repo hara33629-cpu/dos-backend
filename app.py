@@ -91,6 +91,7 @@ def log_request():
         "message": "Request logged successfully",
         "data": log,
         "features": features,
+        "decision": decision
     })
 
 @app.route("/logs", methods=["GET"])
