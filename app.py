@@ -6,6 +6,10 @@ from flask_cors import CORS
 import time
 import sqlite3
 
+# ✅ Import ML modules
+from utils.feature_extractor import extract_features
+from utils.predictor import predict_trust_score
+
 app = Flask(__name__)
 CORS(app)
 
@@ -14,9 +18,9 @@ traffic_logs = []
 
 
 # =========================
-# FEATURE EXTRACTION
+# BEHAVIOR FEATURE EXTRACTION (RENAMED)
 # =========================
-def extract_features(ip, request_size, user_agent):
+def extract_behavior_features(ip, request_size, user_agent):
     current_time = time.time()
 
     request_counts[ip].append(current_time)
@@ -43,7 +47,7 @@ def extract_features(ip, request_size, user_agent):
 
 
 # =========================
-# DETECTION LOGIC
+# RULE-BASED DETECTION (BACKUP)
 # =========================
 def detect_attack(features):
     if features["high_request_rate"] and features["small_payload"]:
@@ -62,6 +66,7 @@ def get_client_ip():
     if request.headers.get("X-Forwarded-For"):
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
     return request.remote_addr
+
 
 # =========================
 # DATABASE INIT FUNCTION
@@ -92,7 +97,7 @@ def init_db():
     conn.close()
 
 
-# ✅ CALL IT HERE (GLOBAL LEVEL)
+# Initialize DB
 init_db()
 
 
@@ -129,7 +134,7 @@ def save_to_db(log, features, decision):
 
 
 # =========================
-# MAIN ROUTE
+# MAIN ROUTE (UPDATED WITH DNN)
 # =========================
 @app.route("/", methods=["GET", "POST"])
 def log_request():
@@ -139,9 +144,37 @@ def log_request():
     user_agent = request.headers.get("User-Agent", "unknown")
     request_size = len(request.data)
 
-    features = extract_features(ip, request_size, user_agent)
-    decision = detect_attack(features)
+    # ✅ Step 1: Extract behavior features
+    features_dict = extract_behavior_features(ip, request_size, user_agent)
 
+    # ✅ Step 2: Convert features → ML input
+    features_list = [
+        request_size,
+        int(features_dict["high_request_rate"]),
+        int(features_dict["repeated_access"]),
+        int(features_dict["small_payload"]),
+        int(features_dict["large_payload"]),
+        int(features_dict["unusual_user_agent"])
+    ]
+
+    # ✅ Step 3: DNN Prediction
+    trust_score = predict_trust_score(features_list)
+
+    # ✅ Step 4: Rule-based backup
+    rule_decision = detect_attack(features_dict)
+
+    # ✅ Step 5: Final Decision (Hybrid)
+    if rule_decision == "BLOCK":
+        decision = "BLOCK"
+    else:
+        if trust_score > 0.8:
+            decision = "ALLOW"
+        elif trust_score > 0.5:
+            decision = "SUSPICIOUS"
+        else:
+            decision = "BLOCK"
+
+    # Log data
     log = {
         "ip": ip,
         "timestamp": timestamp,
@@ -152,23 +185,25 @@ def log_request():
 
     traffic_logs.append(log)
 
-    # ✅ SAVE TO DB
-    save_to_db(log, features, decision)
+    # ✅ Save to DB
+    save_to_db(log, features_dict, decision)
 
     print("📥 Request Logged:", log)
-    print("⚙️ Features:", features)
+    print("⚙️ Features:", features_dict)
+    print("🧠 Trust Score:", trust_score)
     print("🚦 Decision:", decision)
 
     return jsonify({
         "message": "Request logged successfully",
         "data": log,
-        "features": features,
+        "features": features_dict,
+        "trust_score": trust_score,
         "decision": decision
     })
 
 
 # =========================
-# FETCH LOGS FROM DATABASE
+# FETCH LOGS
 # =========================
 @app.route("/logs", methods=["GET"])
 def get_logs():
@@ -187,5 +222,5 @@ def get_logs():
 # RUN APP
 # =========================
 if __name__ == "__main__":
-    init_db()   # ✅ create DB
+    init_db()
     app.run(debug=True)
