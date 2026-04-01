@@ -63,9 +63,8 @@ def get_client_ip():
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
     return request.remote_addr
 
-
 # =========================
-# DATABASE INIT
+# DATABASE INIT FUNCTION
 # =========================
 def init_db():
     conn = sqlite3.connect("traffic.db")
@@ -91,6 +90,10 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+# ✅ CALL IT HERE (GLOBAL LEVEL)
+init_db()
 
 
 # =========================
