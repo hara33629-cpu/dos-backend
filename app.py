@@ -388,22 +388,29 @@ def get_blocked_ips():
 
 @app.route("/unblock", methods=["POST"])
 def unblock_ip():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     ip = data.get("ip")
+
+    if not ip:
+        return jsonify({"error": "IP required"}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("DELETE FROM blocked_ips WHERE ip=%s", (ip,))
-    conn.commit()
+    cursor.execute("DELETE FROM blocked_ips WHERE ip=%s RETURNING ip", (ip,))
+    result = cursor.fetchone()
 
+    conn.commit()
     cursor.close()
     conn.close()
 
     if ip in blocked_ips_cache:
         blocked_ips_cache.remove(ip)
 
-    return jsonify({"message": f"{ip} unblocked"})
+    if result:
+        return jsonify({"message": f"{ip} unblocked"})
+    else:
+        return jsonify({"message": f"{ip} was not blocked"})
 
 
 @app.route("/alerts", methods=["GET"])
@@ -419,6 +426,25 @@ def get_alerts():
 
     return jsonify(rows)
 
+# =========================
+# LOGS API (FIXED 🔥)
+# =========================
+@app.route("/logs", methods=["GET"])
+def get_logs():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM traffic_logs ORDER BY id DESC")
+        rows = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        return jsonify(rows)
+
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 # =========================
 # RUN APP
