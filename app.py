@@ -1,7 +1,4 @@
 from collections import defaultdict
-request_counts = defaultdict(list)
-rate_limit_store = defaultdict(list)
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import time
@@ -11,9 +8,16 @@ import os
 from utils.predictor import predict_trust_score
 
 # =========================
+# IN-MEMORY STORES
+# =========================
+request_counts = defaultdict(list)
+rate_limit_store = defaultdict(list)
+blocked_ips_cache = set()
+
+# =========================
 # DATABASE CONFIG
 # =========================
-DATABASE_URL = os.getenv("DATABASE_URL") or "postgresql://dos_db_user:HenUNMcO7hT1YTIys5pQftIwBDDg1yzz@dpg-d78it8hr0fns73e0mjmg-a/dos_db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -24,7 +28,7 @@ def init_db():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # traffic logs
+        # Traffic logs
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS traffic_logs (
             id SERIAL PRIMARY KEY,
@@ -44,7 +48,7 @@ def init_db():
         )
         """)
 
-        # blocked IPs
+        # Blocked IPs
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS blocked_ips (
             ip TEXT PRIMARY KEY,
@@ -53,9 +57,20 @@ def init_db():
         )
         """)
 
+        # Alerts
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+            id SERIAL PRIMARY KEY,
+            ip TEXT,
+            message TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
         conn.commit()
         cursor.close()
         conn.close()
+
         print("✅ Database initialized")
 
     except Exception as e:
@@ -72,14 +87,34 @@ CORS(app)
 def initialize_database():
     if not hasattr(app, "db_initialized"):
         init_db()
+        load_blocked_ips()
         app.db_initialized = True
+
+
+# =========================
+# ALERT SYSTEM
+# =========================
+def create_alert(ip, message):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "INSERT INTO alerts (ip, message) VALUES (%s, %s)",
+            (ip, message)
+        )
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        print("❌ Alert Error:", e)
 
 
 # =========================
 # IP BLACKLIST
 # =========================
-blocked_ips_cache = set()
-
 def load_blocked_ips():
     try:
         conn = get_db_connection()
@@ -93,8 +128,9 @@ def load_blocked_ips():
 
         cursor.close()
         conn.close()
-    except:
-        pass
+
+    except Exception as e:
+        print("❌ Load Blocked IPs Error:", e)
 
 
 def is_ip_blocked(ip):
@@ -117,6 +153,10 @@ def block_ip(ip, reason="Auto blocked"):
         conn.close()
 
         blocked_ips_cache.add(ip)
+
+        # 🔥 create alert
+        create_alert(ip, reason)
+
         print(f"🚫 IP BLOCKED: {ip}")
 
     except Exception as e:
@@ -167,7 +207,7 @@ def extract_behavior_features(ip, request_size, user_agent):
 
 
 # =========================
-# THREAT SCORE (NEW 🔥)
+# THREAT SCORE
 # =========================
 def calculate_threat_score(trust_score, features):
     rule_score = 0
@@ -183,7 +223,6 @@ def calculate_threat_score(trust_score, features):
     if features["large_payload"]:
         rule_score += 0.1
 
-    # Combine ML + rules
     threat_score = (1 - trust_score) * 0.6 + rule_score * 0.4
 
     return min(threat_score, 1.0)
@@ -244,7 +283,7 @@ def save_to_db(log, features, threat_score, decision):
 def log_request():
     ip = get_client_ip()
 
-    # 🚫 Step 1: Check blacklist
+    # 🚫 Blacklist check
     if is_ip_blocked(ip):
         return jsonify({"decision": "BLOCKED (BLACKLIST)"}), 403
 
@@ -253,7 +292,7 @@ def log_request():
     user_agent = request.headers.get("User-Agent", "unknown")
     request_size = len(request.data)
 
-    # 🚫 Step 2: Rate limit check
+    # 🚫 Rate limit
     if is_rate_limited(ip):
         block_ip(ip, "Rate limit exceeded")
         return jsonify({"decision": "BLOCKED (RATE LIMIT)"}), 429
@@ -273,7 +312,7 @@ def log_request():
     # ML
     trust_score = float(predict_trust_score(features_list))
 
-    # 🔥 Threat score
+    # Threat score
     threat_score = float(calculate_threat_score(trust_score, features))
 
     # Decision
@@ -307,9 +346,78 @@ def log_request():
 
 
 # =========================
-# LOAD BLOCKED IPS ON START
+# ADMIN APIs
 # =========================
-load_blocked_ips()
+@app.route("/stats", methods=["GET"])
+def get_stats():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM traffic_logs")
+    total = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM traffic_logs WHERE decision='BLOCK'")
+    blocked = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(DISTINCT ip) FROM traffic_logs")
+    unique_ips = cursor.fetchone()[0]
+
+    cursor.close()
+    conn.close()
+
+    return jsonify({
+        "total_requests": total,
+        "blocked_requests": blocked,
+        "unique_ips": unique_ips
+    })
+
+
+@app.route("/blocked", methods=["GET"])
+def get_blocked_ips():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM blocked_ips ORDER BY blocked_at DESC")
+    rows = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return jsonify(rows)
+
+
+@app.route("/unblock", methods=["POST"])
+def unblock_ip():
+    data = request.json
+    ip = data.get("ip")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM blocked_ips WHERE ip=%s", (ip,))
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    if ip in blocked_ips_cache:
+        blocked_ips_cache.remove(ip)
+
+    return jsonify({"message": f"{ip} unblocked"})
+
+
+@app.route("/alerts", methods=["GET"])
+def get_alerts():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM alerts ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return jsonify(rows)
 
 
 # =========================
@@ -317,5 +425,6 @@ load_blocked_ips()
 # =========================
 if __name__ == "__main__":
     init_db()
+    load_blocked_ips()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
