@@ -381,60 +381,43 @@ def log_request():
     })
 
 # =========================
-# ADMIN APIs
+# FIXED /alerts ENDPOINT
 # =========================
-@app.route("/stats")
-def get_stats():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT COUNT(*) FROM traffic_logs")
-    total = cursor.fetchone()[0]
-
-    cursor.execute("SELECT COUNT(*) FROM traffic_logs WHERE decision='BLOCK'")
-    blocked = cursor.fetchone()[0]
-
-    cursor.execute("SELECT COUNT(DISTINCT ip) FROM traffic_logs")
-    unique_ips = cursor.fetchone()[0]
-
-    cursor.close()
-    conn.close()
-
-    return jsonify({
-        "total_requests": total,
-        "blocked_requests": blocked,
-        "unique_ips": unique_ips
-    })
-
-@app.route("/blocked", methods=["GET"])
-def get_blocked_ips():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT ip, blocked_at, reason FROM blocked_ips ORDER BY blocked_at DESC")
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-
-        result = [{"ip": r[0], "blocked_at": str(r[1]), "reason": r[2]} for r in rows]
-
-        return jsonify({"count": len(result), "blocked_ips": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 @app.route("/alerts", methods=["GET"])
 def get_alerts():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+
+        # Fetch all alerts
         cursor.execute("SELECT id, ip, message, created_at FROM alerts ORDER BY created_at DESC")
         rows = cursor.fetchall()
+
+        # Count alert types
+        cursor.execute("""
+            SELECT 
+                CASE 
+                    WHEN message LIKE 'Rate limit%' THEN 'RATE_LIMIT'
+                    WHEN message LIKE 'High threat score%' THEN 'HIGH_THREAT'
+                    ELSE 'OTHER'
+                END AS alert_type,
+                COUNT(*) 
+            FROM alerts 
+            GROUP BY alert_type
+        """)
+        type_counts = {r[0]: r[1] for r in cursor.fetchall()}
+
         cursor.close()
         conn.close()
 
         result = [{"id": r[0], "ip": r[1], "message": r[2], "created_at": str(r[3])} for r in rows]
 
-        return jsonify({"count": len(result), "alerts": result})
+        return jsonify({
+            "count": len(result),
+            "alerts": result,
+            "type_counts": type_counts  # new summary by alert type
+        })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -453,6 +436,72 @@ def get_logs():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# =========================
+# FIXED /stats ENDPOINT
+# =========================
+@app.route("/stats")
+def get_stats():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) FROM traffic_logs")
+        total = cursor.fetchone()[0]
+
+        # Count all blocked types
+        cursor.execute("SELECT COUNT(*) FROM traffic_logs WHERE decision LIKE 'BLOCK%'")
+        blocked = cursor.fetchone()[0]
+
+        # Count suspicious
+        cursor.execute("SELECT COUNT(*) FROM traffic_logs WHERE decision='SUSPICIOUS'")
+        suspicious = cursor.fetchone()[0]
+
+        # Count allowed
+        cursor.execute("SELECT COUNT(*) FROM traffic_logs WHERE decision='ALLOW'")
+        allowed = cursor.fetchone()[0]
+
+        # Unique IPs
+        cursor.execute("SELECT COUNT(DISTINCT ip) FROM traffic_logs")
+        unique_ips = cursor.fetchone()[0]
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            "total_requests": total,
+            "blocked_requests": blocked,
+            "suspicious_requests": suspicious,
+            "allowed_requests": allowed,
+            "unique_ips": unique_ips
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# =========================
+# FIXED /blocked_requests
+# =========================
+@app.route("/blocked_requests", methods=["GET"])
+def get_blocked_requests():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # fetch all types starting with BLOCK
+        cursor.execute("SELECT * FROM traffic_logs WHERE decision LIKE 'BLOCK%' ORDER BY id DESC")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        result = [map_traffic_log_row(r) for r in rows]
+        return jsonify({"count": len(result), "blocked_requests": result})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# =========================
+# FIXED /allowed_requests
+# =========================
 @app.route("/allowed_requests", methods=["GET"])
 def get_allowed_requests():
     try:
@@ -465,9 +514,13 @@ def get_allowed_requests():
 
         result = [map_traffic_log_row(r) for r in rows]
         return jsonify({"count": len(result), "allowed_requests": result})
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# =========================
+# FIXED /suspicious_requests
+# =========================
 @app.route("/suspicious_requests", methods=["GET"])
 def get_suspicious_requests():
     try:
@@ -480,21 +533,7 @@ def get_suspicious_requests():
 
         result = [map_traffic_log_row(r) for r in rows]
         return jsonify({"count": len(result), "suspicious_requests": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
-@app.route("/blocked_requests", methods=["GET"])
-def get_blocked_requests():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM traffic_logs WHERE decision='BLOCK' ORDER BY id DESC")
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-
-        result = [map_traffic_log_row(r) for r in rows]
-        return jsonify({"count": len(result), "blocked_requests": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
