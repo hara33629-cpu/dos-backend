@@ -8,49 +8,65 @@ import psycopg2
 import os
 
 # ✅ Import ML modules
-from utils.feature_extractor import extract_features
 from utils.predictor import predict_trust_score
-
-app = Flask(__name__)
-CORS(app)
-
-# In-memory storage (optional)
-traffic_logs = []
 
 # =========================
 # DATABASE CONFIG
 # =========================
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL") or "postgresql://dos_db_user:HenUNMcO7hT1YTIys5pQftIwBDDg1yzz@dpg-d78it8hr0fns73e0mjmg-a/dos_db"
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 
 def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS traffic_logs (
-        id SERIAL PRIMARY KEY,
-        ip TEXT,
-        timestamp DOUBLE PRECISION,
-        method TEXT,
-        user_agent TEXT,
-        request_size INTEGER,
-        request_count INTEGER,
-        high_request_rate BOOLEAN,
-        repeated_access BOOLEAN,
-        small_payload BOOLEAN,
-        large_payload BOOLEAN,
-        unusual_user_agent BOOLEAN,
-        decision TEXT
-    )
-    """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS traffic_logs (
+            id SERIAL PRIMARY KEY,
+            ip TEXT,
+            timestamp DOUBLE PRECISION,
+            method TEXT,
+            user_agent TEXT,
+            request_size INTEGER,
+            request_count INTEGER,
+            high_request_rate BOOLEAN,
+            repeated_access BOOLEAN,
+            small_payload BOOLEAN,
+            large_payload BOOLEAN,
+            unusual_user_agent BOOLEAN,
+            decision TEXT
+        )
+        """)
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("✅ Database initialized")
+
+    except Exception as e:
+        print("❌ DB Init Error:", e)
+
+
+# =========================
+# APP INIT
+# =========================
+app = Flask(__name__)
+CORS(app)
+
+# ✅ Ensure DB is created (works in Render)
+@app.before_request
+def initialize_database():
+    if not hasattr(app, "db_initialized"):
+        init_db()
+        app.db_initialized = True
+
+
+# In-memory storage (optional)
+traffic_logs = []
 
 
 # =========================
@@ -105,7 +121,7 @@ def get_client_ip():
 
 
 # =========================
-# SAVE TO DATABASE (FIXED)
+# SAVE TO DATABASE
 # =========================
 def save_to_db(log, features, decision):
     try:
@@ -210,7 +226,7 @@ def log_request():
 
 
 # =========================
-# FETCH LOGS (FIXED)
+# FETCH LOGS
 # =========================
 @app.route("/logs", methods=["GET"])
 def get_logs():
@@ -231,7 +247,7 @@ def get_logs():
 
 
 # =========================
-# RUN APP (RENDER FIX)
+# RUN APP (LOCAL ONLY)
 # =========================
 if __name__ == "__main__":
     init_db()
