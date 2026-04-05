@@ -426,32 +426,71 @@ def get_stats():
     })
 
 
-@app.route("/blocked")
+@app.route("/blocked", methods=["GET"])
 def get_blocked_ips():
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM blocked_ips ORDER BY blocked_at DESC")
-    rows = cursor.fetchall()
+        cursor.execute("""
+            SELECT ip, blocked_at, reason
+            FROM blocked_ips
+            ORDER BY blocked_at DESC
+        """)
+        rows = cursor.fetchall()
 
-    cursor.close()
-    conn.close()
+        cursor.close()
+        conn.close()
 
-    return jsonify(rows)
+        result = []
+        for row in rows:
+            result.append({
+                "ip": row[0],
+                "blocked_at": str(row[1]),
+                "reason": row[2]
+            })
+
+        return jsonify({
+            "count": len(result),
+            "blocked_ips": result
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route("/alerts")
+@app.route("/alerts", methods=["GET"])
 def get_alerts():
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM alerts ORDER BY created_at DESC")
-    rows = cursor.fetchall()
+        cursor.execute("""
+            SELECT id, ip, message, created_at
+            FROM alerts
+            ORDER BY created_at DESC
+        """)
+        rows = cursor.fetchall()
 
-    cursor.close()
-    conn.close()
+        cursor.close()
+        conn.close()
 
-    return jsonify(rows)
+        result = []
+        for row in rows:
+            result.append({
+                "id": row[0],
+                "ip": row[1],
+                "message": row[2],
+                "created_at": str(row[3])
+            })
+
+        return jsonify({
+            "count": len(result),
+            "alerts": result
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/logs")
