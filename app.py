@@ -1,5 +1,6 @@
 from collections import defaultdict
 request_counts = defaultdict(list)
+rate_limit_store = defaultdict(list)
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -7,7 +8,6 @@ import time
 import psycopg2
 import os
 
-# ✅ Import ML modules
 from utils.predictor import predict_trust_score
 
 # =========================
@@ -24,6 +24,7 @@ def init_db():
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # traffic logs
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS traffic_logs (
             id SERIAL PRIMARY KEY,
@@ -38,7 +39,17 @@ def init_db():
             small_payload BOOLEAN,
             large_payload BOOLEAN,
             unusual_user_agent BOOLEAN,
+            threat_score FLOAT,
             decision TEXT
+        )
+        """)
+
+        # blocked IPs
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS blocked_ips (
+            ip TEXT PRIMARY KEY,
+            blocked_at TIMESTAMP,
+            reason TEXT
         )
         """)
 
@@ -57,7 +68,6 @@ def init_db():
 app = Flask(__name__)
 CORS(app)
 
-# ✅ Ensure DB is created (works in Render)
 @app.before_request
 def initialize_database():
     if not hasattr(app, "db_initialized"):
@@ -65,19 +75,77 @@ def initialize_database():
         app.db_initialized = True
 
 
-# In-memory storage (optional)
-traffic_logs = []
+# =========================
+# IP BLACKLIST
+# =========================
+blocked_ips_cache = set()
+
+def load_blocked_ips():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT ip FROM blocked_ips")
+        rows = cursor.fetchall()
+
+        for row in rows:
+            blocked_ips_cache.add(row[0])
+
+        cursor.close()
+        conn.close()
+    except:
+        pass
+
+
+def is_ip_blocked(ip):
+    return ip in blocked_ips_cache
+
+
+def block_ip(ip, reason="Auto blocked"):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        INSERT INTO blocked_ips (ip, blocked_at, reason)
+        VALUES (%s, NOW(), %s)
+        ON CONFLICT (ip) DO NOTHING
+        """, (ip, reason))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        blocked_ips_cache.add(ip)
+        print(f"🚫 IP BLOCKED: {ip}")
+
+    except Exception as e:
+        print("❌ Block IP Error:", e)
 
 
 # =========================
-# BEHAVIOR FEATURE EXTRACTION
+# RATE LIMITER
+# =========================
+def is_rate_limited(ip):
+    now = time.time()
+
+    rate_limit_store[ip] = [
+        t for t in rate_limit_store[ip] if now - t <= 5
+    ]
+
+    rate_limit_store[ip].append(now)
+
+    return len(rate_limit_store[ip]) > 20
+
+
+# =========================
+# FEATURE EXTRACTION
 # =========================
 def extract_behavior_features(ip, request_size, user_agent):
     current_time = time.time()
 
     request_counts[ip].append(current_time)
 
-    # Keep last 60 sec
     request_counts[ip] = [
         t for t in request_counts[ip] if current_time - t <= 60
     ]
@@ -99,16 +167,26 @@ def extract_behavior_features(ip, request_size, user_agent):
 
 
 # =========================
-# RULE-BASED DETECTION
+# THREAT SCORE (NEW 🔥)
 # =========================
-def detect_attack(features):
-    if features["high_request_rate"] and features["small_payload"]:
-        return "BLOCK"
+def calculate_threat_score(trust_score, features):
+    rule_score = 0
 
-    if features["repeated_access"] or features["unusual_user_agent"]:
-        return "SUSPICIOUS"
+    if features["high_request_rate"]:
+        rule_score += 0.4
+    if features["repeated_access"]:
+        rule_score += 0.2
+    if features["unusual_user_agent"]:
+        rule_score += 0.2
+    if features["small_payload"]:
+        rule_score += 0.1
+    if features["large_payload"]:
+        rule_score += 0.1
 
-    return "ALLOW"
+    # Combine ML + rules
+    threat_score = (1 - trust_score) * 0.6 + rule_score * 0.4
+
+    return min(threat_score, 1.0)
 
 
 # =========================
@@ -121,9 +199,9 @@ def get_client_ip():
 
 
 # =========================
-# SAVE TO DATABASE
+# SAVE TO DB
 # =========================
-def save_to_db(log, features, decision):
+def save_to_db(log, features, threat_score, decision):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -132,8 +210,9 @@ def save_to_db(log, features, decision):
         INSERT INTO traffic_logs (
             ip, timestamp, method, user_agent, request_size,
             request_count, high_request_rate, repeated_access,
-            small_payload, large_payload, unusual_user_agent, decision
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            small_payload, large_payload, unusual_user_agent,
+            threat_score, decision
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             log["ip"],
             log["timestamp"],
@@ -146,6 +225,7 @@ def save_to_db(log, features, decision):
             features["small_payload"],
             features["large_payload"],
             features["unusual_user_agent"],
+            threat_score,
             decision
         ))
 
@@ -163,40 +243,47 @@ def save_to_db(log, features, decision):
 @app.route("/", methods=["GET", "POST"])
 def log_request():
     ip = get_client_ip()
+
+    # 🚫 Step 1: Check blacklist
+    if is_ip_blocked(ip):
+        return jsonify({"decision": "BLOCKED (BLACKLIST)"}), 403
+
     timestamp = time.time()
     method = request.method
     user_agent = request.headers.get("User-Agent", "unknown")
     request_size = len(request.data)
 
-    # Feature extraction
-    features_dict = extract_behavior_features(ip, request_size, user_agent)
+    # 🚫 Step 2: Rate limit check
+    if is_rate_limited(ip):
+        block_ip(ip, "Rate limit exceeded")
+        return jsonify({"decision": "BLOCKED (RATE LIMIT)"}), 429
 
-    # Convert features → ML input
+    # Features
+    features = extract_behavior_features(ip, request_size, user_agent)
+
     features_list = [
         request_size,
-        int(features_dict["high_request_rate"]),
-        int(features_dict["repeated_access"]),
-        int(features_dict["small_payload"]),
-        int(features_dict["large_payload"]),
-        int(features_dict["unusual_user_agent"])
+        int(features["high_request_rate"]),
+        int(features["repeated_access"]),
+        int(features["small_payload"]),
+        int(features["large_payload"]),
+        int(features["unusual_user_agent"])
     ]
 
-    # ML Prediction
+    # ML
     trust_score = predict_trust_score(features_list)
 
-    # Rule-based fallback
-    rule_decision = detect_attack(features_dict)
+    # 🔥 Threat score
+    threat_score = calculate_threat_score(trust_score, features)
 
-    # Final decision
-    if rule_decision == "BLOCK":
+    # Decision
+    if threat_score > 0.7:
         decision = "BLOCK"
+        block_ip(ip, "High threat score")
+    elif threat_score > 0.4:
+        decision = "SUSPICIOUS"
     else:
-        if trust_score > 0.8:
-            decision = "ALLOW"
-        elif trust_score > 0.5:
-            decision = "SUSPICIOUS"
-        else:
-            decision = "BLOCK"
+        decision = "ALLOW"
 
     log = {
         "ip": ip,
@@ -206,48 +293,27 @@ def log_request():
         "request_size": request_size
     }
 
-    traffic_logs.append(log)
+    save_to_db(log, features, threat_score, decision)
 
-    # Save to DB
-    save_to_db(log, features_dict, decision)
-
-    print("📥 Request Logged:", log)
-    print("⚙️ Features:", features_dict)
-    print("🧠 Trust Score:", trust_score)
+    print("🧠 Threat Score:", threat_score)
     print("🚦 Decision:", decision)
 
     return jsonify({
-        "message": "Request logged successfully",
-        "data": log,
-        "features": features_dict,
+        "decision": decision,
         "trust_score": trust_score,
-        "decision": decision
+        "threat_score": threat_score,
+        "features": features
     })
 
 
 # =========================
-# FETCH LOGS
+# LOAD BLOCKED IPS ON START
 # =========================
-@app.route("/logs", methods=["GET"])
-def get_logs():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT * FROM traffic_logs ORDER BY id DESC")
-        rows = cursor.fetchall()
-
-        cursor.close()
-        conn.close()
-
-        return jsonify(rows)
-
-    except Exception as e:
-        return jsonify({"error": str(e)})
+load_blocked_ips()
 
 
 # =========================
-# RUN APP (LOCAL ONLY)
+# RUN APP
 # =========================
 if __name__ == "__main__":
     init_db()
