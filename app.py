@@ -4,6 +4,8 @@ from flask_cors import CORS
 import time
 import psycopg2
 import os
+import smtplib
+from email.mime.text import MIMEText
 
 from utils.predictor import predict_trust_score
 
@@ -13,6 +15,7 @@ from utils.predictor import predict_trust_score
 request_counts = defaultdict(list)
 rate_limit_store = defaultdict(list)
 blocked_ips_cache = set()
+alerted_ips = set()  # ✅ prevent multiple emails per IP
 
 # =========================
 # DATABASE CONFIG
@@ -28,7 +31,6 @@ def init_db():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Traffic logs
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS traffic_logs (
             id SERIAL PRIMARY KEY,
@@ -48,7 +50,6 @@ def init_db():
         )
         """)
 
-        # Blocked IPs
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS blocked_ips (
             ip TEXT PRIMARY KEY,
@@ -57,7 +58,6 @@ def init_db():
         )
         """)
 
-        # Alerts
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS alerts (
             id SERIAL PRIMARY KEY,
@@ -113,6 +113,67 @@ def create_alert(ip, message):
 
 
 # =========================
+# EMAIL ALERT
+# =========================
+def send_email_alert(ip, reason):
+    try:
+        sender = os.getenv("EMAIL_USER")
+        password = os.getenv("EMAIL_PASS")
+
+        if not sender or not password:
+            print("⚠️ Email credentials missing")
+            return
+
+        subject = "🚨 DOS ATTACK DETECTED & BLOCKED"
+
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial; background-color: #f4f4f4; padding: 20px;">
+            <div style="max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 10px;">
+                
+                <h2 style="color: red;">🚨 DOS Attack Alert</h2>
+                
+                <p><strong>Status:</strong> IP Blocked</p>
+                
+                <table style="width: 100%;">
+                    <tr><td><strong>IP Address:</strong></td><td>{ip}</td></tr>
+                    <tr><td><strong>Reason:</strong></td><td>{reason}</td></tr>
+                    <tr><td><strong>Time:</strong></td><td>{time.strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
+                </table>
+
+                <hr>
+
+                <p style="color: gray;">
+                    This IP has been automatically blocked by your DOS Detection System.
+                </p>
+
+                <p style="font-size: 12px; color: gray;">
+                    Project: DOS Mitigation System
+                </p>
+
+            </div>
+        </body>
+        </html>
+        """
+
+        msg = MIMEText(html_body, "html")
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = sender
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender, password)
+        server.sendmail(sender, sender, msg.as_string())
+        server.quit()
+
+        print("📧 Email alert sent!")
+
+    except Exception as e:
+        print("❌ Email Error:", e)
+
+
+# =========================
 # IP BLACKLIST
 # =========================
 def load_blocked_ips():
@@ -153,9 +214,12 @@ def block_ip(ip, reason="Auto blocked"):
         conn.close()
 
         blocked_ips_cache.add(ip)
-
-        # 🔥 create alert
         create_alert(ip, reason)
+
+        # ✅ send email only once
+        if ip not in alerted_ips:
+            send_email_alert(ip, reason)
+            alerted_ips.add(ip)
 
         print(f"🚫 IP BLOCKED: {ip}")
 
@@ -283,7 +347,6 @@ def save_to_db(log, features, threat_score, decision):
 def log_request():
     ip = get_client_ip()
 
-    # 🚫 Blacklist check
     if is_ip_blocked(ip):
         return jsonify({"decision": "BLOCKED (BLACKLIST)"}), 403
 
@@ -292,12 +355,10 @@ def log_request():
     user_agent = request.headers.get("User-Agent", "unknown")
     request_size = len(request.data)
 
-    # 🚫 Rate limit
     if is_rate_limited(ip):
         block_ip(ip, "Rate limit exceeded")
         return jsonify({"decision": "BLOCKED (RATE LIMIT)"}), 429
 
-    # Features
     features = extract_behavior_features(ip, request_size, user_agent)
 
     features_list = [
@@ -309,13 +370,9 @@ def log_request():
         int(features["unusual_user_agent"])
     ]
 
-    # ML
     trust_score = float(predict_trust_score(features_list))
-
-    # Threat score
     threat_score = float(calculate_threat_score(trust_score, features))
 
-    # Decision
     if threat_score > 0.7:
         decision = "BLOCK"
         block_ip(ip, "High threat score")
@@ -334,9 +391,6 @@ def log_request():
 
     save_to_db(log, features, threat_score, decision)
 
-    print("🧠 Threat Score:", threat_score)
-    print("🚦 Decision:", decision)
-
     return jsonify({
         "decision": decision,
         "trust_score": trust_score,
@@ -348,7 +402,7 @@ def log_request():
 # =========================
 # ADMIN APIs
 # =========================
-@app.route("/stats", methods=["GET"])
+@app.route("/stats")
 def get_stats():
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -372,7 +426,7 @@ def get_stats():
     })
 
 
-@app.route("/blocked", methods=["GET"])
+@app.route("/blocked")
 def get_blocked_ips():
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -386,34 +440,7 @@ def get_blocked_ips():
     return jsonify(rows)
 
 
-@app.route("/unblock", methods=["POST"])
-def unblock_ip():
-    data = request.get_json(silent=True) or {}
-    ip = data.get("ip")
-
-    if not ip:
-        return jsonify({"error": "IP required"}), 400
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("DELETE FROM blocked_ips WHERE ip=%s RETURNING ip", (ip,))
-    result = cursor.fetchone()
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    if ip in blocked_ips_cache:
-        blocked_ips_cache.remove(ip)
-
-    if result:
-        return jsonify({"message": f"{ip} unblocked"})
-    else:
-        return jsonify({"message": f"{ip} was not blocked"})
-
-
-@app.route("/alerts", methods=["GET"])
+@app.route("/alerts")
 def get_alerts():
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -426,25 +453,25 @@ def get_alerts():
 
     return jsonify(rows)
 
-# =========================
-# LOGS API (FIXED 🔥)
-# =========================
-@app.route("/logs", methods=["GET"])
+
+@app.route("/logs")
 def get_logs():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM traffic_logs ORDER BY id DESC")
-        rows = cursor.fetchall()
+    cursor.execute("SELECT * FROM traffic_logs ORDER BY id DESC")
+    rows = cursor.fetchall()
 
-        cursor.close()
-        conn.close()
+    cursor.close()
+    conn.close()
 
-        return jsonify(rows)
+    return jsonify(rows)
 
-    except Exception as e:
-        return jsonify({"error": str(e)})
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
 
 # =========================
 # RUN APP
