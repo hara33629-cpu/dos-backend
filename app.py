@@ -271,10 +271,10 @@ def log_request():
     ]
 
     # ML
-    trust_score = predict_trust_score(features_list)
+    trust_score = float(predict_trust_score(features_list))
 
     # 🔥 Threat score
-    threat_score = calculate_threat_score(trust_score, features)
+    threat_score = float(calculate_threat_score(trust_score, features))
 
     # Decision
     if threat_score > 0.7:
