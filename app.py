@@ -227,7 +227,7 @@ def is_rate_limited(ip):
     now = time.time()
     rate_limit_store[ip] = [t for t in rate_limit_store[ip] if now - t <= 5]
     rate_limit_store[ip].append(now)
-    return len(rate_limit_store[ip]) > 20
+    return len(rate_limit_store[ip]) > 2
 
 # =========================
 # FEATURE EXTRACTION
