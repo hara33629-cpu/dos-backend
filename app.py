@@ -206,13 +206,11 @@ def block_ip(ip, reason="Auto blocked"):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-
         cursor.execute("""
-        INSERT INTO blocked_ips (ip, blocked_at, reason)
-        VALUES (%s, NOW(), %s)
-        ON CONFLICT (ip) DO NOTHING
+            INSERT INTO blocked_ips (ip, blocked_at, reason)
+            VALUES (%s, NOW(), %s)
+            ON CONFLICT (ip) DO NOTHING
         """, (ip, reason))
-
         conn.commit()
         cursor.close()
         conn.close()
@@ -222,14 +220,20 @@ def block_ip(ip, reason="Auto blocked"):
 
         # ✅ send email only once
         if ip not in alerted_ips:
-            send_email_alert(ip, reason)
+            send_email_alert(ip, "BLOCK", 1.0, {
+                "request_count": 0,
+                "high_request_rate": True,
+                "repeated_access": True,
+                "small_payload": False,
+                "large_payload": False,
+                "unusual_user_agent": False
+            })
             alerted_ips.add(ip)
 
         print(f"🚫 IP BLOCKED: {ip}")
 
     except Exception as e:
         print("❌ Block IP Error:", e)
-
 
 # =========================
 # RATE LIMITER
@@ -305,55 +309,49 @@ def get_client_ip():
     return request.remote_addr
 
 
-# =========================
-# SAVE TO DB
-# =========================
 def save_to_db(log, features, threat_score, decision):
+    decision = normalize_decision(decision)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-
         cursor.execute("""
-        INSERT INTO traffic_logs (
-            ip, timestamp, method, user_agent, request_size,
-            request_count, high_request_rate, repeated_access,
-            small_payload, large_payload, unusual_user_agent,
-            threat_score, decision
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO traffic_logs (
+                ip, timestamp, method, user_agent, request_size,
+                request_count, high_request_rate, repeated_access,
+                small_payload, large_payload, unusual_user_agent,
+                threat_score, decision
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            log["ip"],
-            log["timestamp"],
-            log["method"],
-            log["user_agent"],
-            log["request_size"],
-            features["request_count"],
-            features["high_request_rate"],
-            features["repeated_access"],
-            features["small_payload"],
-            features["large_payload"],
-            features["unusual_user_agent"],
-            threat_score,
-            decision
+            log["ip"], log["timestamp"], log["method"], log["user_agent"], log["request_size"],
+            features["request_count"], features["high_request_rate"], features["repeated_access"],
+            features["small_payload"], features["large_payload"], features["unusual_user_agent"],
+            threat_score, decision
         ))
-
         conn.commit()
         cursor.close()
         conn.close()
-
     except Exception as e:
         print("❌ DB Error:", e)
 
+# =========================
+# NORMALIZE DECISION
+# =========================
+def normalize_decision(decision):
+    if "BLOCK" in decision:
+        return "BLOCK"
+    elif decision == "SUSPICIOUS":
+        return "SUSPICIOUS"
+    else:
+        return "ALLOW"
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET","POST"])
 def log_request():
     ip = get_client_ip()
-
     timestamp = time.time()
     method = request.method
     user_agent = request.headers.get("User-Agent", "unknown")
     request_size = len(request.data)
 
-    # Default values
     features = {
         "request_count": 0,
         "high_request_rate": False,
@@ -362,58 +360,44 @@ def log_request():
         "large_payload": False,
         "unusual_user_agent": False
     }
+
     trust_score = 0.0
     threat_score = 0.0
     decision = "ALLOW"
 
-    # 🚫 CASE 1: Already Blocked IP
+    # Already blocked
     if is_ip_blocked(ip):
         decision = "BLOCKED (BLACKLIST)"
 
+    elif is_rate_limited(ip):
+        decision = "BLOCK"
+        block_ip(ip, "Rate limit exceeded")
     else:
-        # 🚫 CASE 2: Rate limit
-        if is_rate_limited(ip):
+        features = extract_behavior_features(ip, request_size, user_agent)
+        features_list = [
+            request_size,
+            int(features["high_request_rate"]),
+            int(features["repeated_access"]),
+            int(features["small_payload"]),
+            int(features["large_payload"]),
+            int(features["unusual_user_agent"])
+        ]
+        trust_score = float(predict_trust_score(features_list))
+        threat_score = float(calculate_threat_score(trust_score, features))
+
+        if threat_score > 0.7:
             decision = "BLOCK"
-            block_ip(ip, "Rate limit exceeded")
-
+            block_ip(ip, "High threat score")
+        elif threat_score > 0.4:
+            decision = "SUSPICIOUS"
         else:
-            # Feature extraction
-            features = extract_behavior_features(ip, request_size, user_agent)
+            decision = "ALLOW"
 
-            features_list = [
-                request_size,
-                int(features["high_request_rate"]),
-                int(features["repeated_access"]),
-                int(features["small_payload"]),
-                int(features["large_payload"]),
-                int(features["unusual_user_agent"])
-            ]
-
-            trust_score = float(predict_trust_score(features_list))
-            threat_score = float(calculate_threat_score(trust_score, features))
-
-            # Decision
-            if threat_score > 0.7:
-                decision = "BLOCK"
-                block_ip(ip, "High threat score")
-            elif threat_score > 0.4:
-                decision = "SUSPICIOUS"
-            else:
-                decision = "ALLOW"
-
-    # ✅ ALWAYS LOG
-    log = {
-        "ip": ip,
-        "timestamp": timestamp,
-        "method": method,
-        "user_agent": user_agent,
-        "request_size": request_size
-    }
-
+    log = {"ip": ip, "timestamp": timestamp, "method": method, "user_agent": user_agent, "request_size": request_size}
     save_to_db(log, features, threat_score, decision)
 
     return jsonify({
-        "decision": decision,
+        "decision": normalize_decision(decision),
         "trust_score": trust_score,
         "threat_score": threat_score,
         "features": features
