@@ -548,6 +548,72 @@ def get_suspicious_requests():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# =========================
+# MODIFY REQUEST DECISION
+# =========================
+@app.route("/modify_request/<int:request_id>", methods=["PUT"])
+def modify_request(request_id):
+    try:
+        data = request.get_json()
+        new_decision = data.get("decision", "ALLOW")
+        new_decision = normalize_decision(new_decision)
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Update the decision in database
+        cursor.execute(
+            "UPDATE traffic_logs SET decision = %s WHERE id = %s",
+            (new_decision, request_id)
+        )
+        conn.commit()
+        
+        # Fetch updated record
+        cursor.execute("SELECT * FROM traffic_logs WHERE id = %s", (request_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if row:
+            return jsonify({
+                "status": "success",
+                "message": f"Request {request_id} updated to {new_decision}",
+                "data": map_traffic_log_row(row)
+            }), 200
+        else:
+            return jsonify({"error": "Record not found"}), 404
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# =========================
+# DELETE REQUEST
+# =========================
+@app.route("/delete_request/<int:request_id>", methods=["DELETE"])
+def delete_request(request_id):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Delete the record from database
+        cursor.execute("DELETE FROM traffic_logs WHERE id = %s", (request_id,))
+        conn.commit()
+        
+        affected_rows = cursor.rowcount
+        cursor.close()
+        conn.close()
+        
+        if affected_rows > 0:
+            return jsonify({
+                "status": "success",
+                "message": f"Request {request_id} deleted successfully"
+            }), 200
+        else:
+            return jsonify({"error": "Record not found"}), 404
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/health")
 def health():
     return "OK", 200
