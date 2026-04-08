@@ -230,7 +230,8 @@ def get_client_ip():
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
     return request.remote_addr
 
-def save_to_db(log, features, threat_score, decision, visited_logs="NORMAL_REQUEST"):
+def save_to_db(log, features, threat_score, decision,
+               visited_logs="NORMAL_REQUEST", visited_url=""):
     decision = normalize_decision(decision)
     try:
         conn = get_db_connection()
@@ -241,8 +242,8 @@ def save_to_db(log, features, threat_score, decision, visited_logs="NORMAL_REQUE
                 ip, timestamp, method, user_agent, request_size,
                 request_count, high_request_rate, repeated_access,
                 small_payload, large_payload, unusual_user_agent,
-                threat_score, decision, visited_logs
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                threat_score, decision, visited_logs, visited_url
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             log["ip"],
             log["timestamp"],
@@ -257,7 +258,8 @@ def save_to_db(log, features, threat_score, decision, visited_logs="NORMAL_REQUE
             features["unusual_user_agent"],
             threat_score,
             decision,
-            visited_logs
+            visited_logs,
+            visited_url
         ))
 
         conn.commit()
@@ -266,7 +268,6 @@ def save_to_db(log, features, threat_score, decision, visited_logs="NORMAL_REQUE
 
     except Exception as e:
         print("❌ DB Error:", e)
-
 def normalize_decision(decision):
     if "BLOCK" in decision:
         return "BLOCK"
@@ -291,7 +292,8 @@ def map_traffic_log_row(row):
         "unusual_user_agent": row[11],
         "threat_score": row[12],
         "decision": row[13],
-        "visited_logs": row[14]
+        "visited_logs": row[14],
+        "visited_url": row[15]
     }
 
 # =========================
@@ -303,9 +305,12 @@ def log_request():
 
     data = request.get_json(silent=True)
     visited_logs = "NORMAL_REQUEST"
+    visited_url = request.url
 
     if data and "action" in data:
         visited_logs = data.get("action")
+        item = data.get("item", {})
+        visited_url = item.get("page", request.url)
 
     timestamp = time.time()
     method = request.method
@@ -363,14 +368,15 @@ def log_request():
         "request_size": request_size
     }
 
-    save_to_db(log, features, threat_score, decision, visited_logs)
+    save_to_db(log, features, threat_score, decision, visited_logs, visited_url)
 
     return jsonify({
         "decision": normalize_decision(decision),
         "trust_score": trust_score,
         "threat_score": threat_score,
         "features": features,
-        "visited_logs": visited_logs
+        "visited_logs": visited_logs,
+        "visited_url": visited_url
     })
 # =========================
 # FIXED /alerts ENDPOINT
