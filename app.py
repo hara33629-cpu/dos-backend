@@ -107,9 +107,9 @@ def create_alert(ip, message):
 def send_email_alert(ip, decision, threat_score, features):
     try:
         # ✅ HARD CODE (PUT YOUR REAL EMAIL HERE)
-        sender = "your_email@gmail.com"
-        password = "your_app_password"
-        receiver = "your_email@gmail.com"
+        sender = "hara33629@gmail.com"
+        password = "smvzvsikecvqsmvu"
+        receiver = "haritha022006@gmail.com"
 
         subject = f"🚨 DOS Alert - {decision}"
 
