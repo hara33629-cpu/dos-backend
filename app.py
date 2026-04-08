@@ -230,30 +230,40 @@ def get_client_ip():
         return request.headers.get("X-Forwarded-For").split(",")[0].strip()
     return request.remote_addr
 
-# =========================
-# SAVE LOG
-# =========================
-def save_to_db(log, features, threat_score, decision):
+def save_to_db(log, features, threat_score, decision, visited_logs="NORMAL_REQUEST"):
     decision = normalize_decision(decision)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+
         cursor.execute("""
             INSERT INTO traffic_logs (
                 ip, timestamp, method, user_agent, request_size,
                 request_count, high_request_rate, repeated_access,
                 small_payload, large_payload, unusual_user_agent,
-                threat_score, decision
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                threat_score, decision, visited_logs
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            log["ip"], log["timestamp"], log["method"], log["user_agent"], log["request_size"],
-            features["request_count"], features["high_request_rate"], features["repeated_access"],
-            features["small_payload"], features["large_payload"], features["unusual_user_agent"],
-            threat_score, decision
+            log["ip"],
+            log["timestamp"],
+            log["method"],
+            log["user_agent"],
+            log["request_size"],
+            features["request_count"],
+            features["high_request_rate"],
+            features["repeated_access"],
+            features["small_payload"],
+            features["large_payload"],
+            features["unusual_user_agent"],
+            threat_score,
+            decision,
+            visited_logs
         ))
+
         conn.commit()
         cursor.close()
         conn.close()
+
     except Exception as e:
         print("❌ DB Error:", e)
 
@@ -265,9 +275,6 @@ def normalize_decision(decision):
     else:
         return "ALLOW"
 
-# =========================
-# HELPER TO MAP TRAFFIC LOG ROW
-# =========================
 def map_traffic_log_row(row):
     return {
         "id": row[0],
@@ -283,36 +290,23 @@ def map_traffic_log_row(row):
         "large_payload": row[10],
         "unusual_user_agent": row[11],
         "threat_score": row[12],
-        "decision": row[13]
+        "decision": row[13],
+        "visited_logs": row[14]
     }
 
 # =========================
 # MAIN LOGGING ENDPOINT
 # =========================
-@app.route("/", methods=["GET","POST"])
+@app.route("/", methods=["GET", "POST"])
 def log_request():
     ip = get_client_ip()
 
-    # 🔥 HANDLE FRONTEND ACTION (VERY IMPORTANT)
     data = request.get_json(silent=True)
+    visited_logs = "NORMAL_REQUEST"
+
     if data and "action" in data:
-        action = data.get("action")
-        item = data.get("item", {})
+        visited_logs = data.get("action")
 
-        if action == "ADD":
-            return jsonify({"message": "Item added", "item": item})
-
-        elif action == "DELETE":
-            return jsonify({"message": "Item deleted", "id": item.get("id")})
-
-        elif action == "UPDATE":
-            return jsonify({"message": "Item updated", "item": item})
-
-        return jsonify({"error": "Invalid action"}), 400
-
-    # =========================
-    # NORMAL TRAFFIC ANALYSIS
-    # =========================
     timestamp = time.time()
     method = request.method
     user_agent = request.headers.get("User-Agent", "unknown")
@@ -356,10 +350,8 @@ def log_request():
         if threat_score > 0.7:
             decision = "BLOCK"
             block_ip(ip, "High threat score")
-
         elif threat_score > 0.4:
             decision = "SUSPICIOUS"
-
         else:
             decision = "ALLOW"
 
@@ -371,15 +363,15 @@ def log_request():
         "request_size": request_size
     }
 
-    save_to_db(log, features, threat_score, decision)
+    save_to_db(log, features, threat_score, decision, visited_logs)
 
     return jsonify({
         "decision": normalize_decision(decision),
         "trust_score": trust_score,
         "threat_score": threat_score,
-        "features": features
+        "features": features,
+        "visited_logs": visited_logs
     })
-
 # =========================
 # FIXED /alerts ENDPOINT
 # =========================
