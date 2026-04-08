@@ -121,6 +121,24 @@ def load_blocked_ips():
     except Exception as e:
         print("❌ Load Blocked IPs Error:", e)
 
+# =========================
+# 🔥 FRONTEND ACTION HANDLER
+# =========================
+def handle_frontend_action(data):
+    action = data.get("action")
+    item = data.get("item", {})
+
+    if action == "ADD":
+        return jsonify({"message": "Item added", "item": item})
+
+    elif action == "DELETE":
+        return jsonify({"message": "Item deleted", "id": item.get("id")})
+
+    elif action == "UPDATE":
+        return jsonify({"message": "Item updated", "item": item})
+
+    return jsonify({"error": "Invalid action"}), 400
+
 def is_ip_blocked(ip):
     return ip in blocked_ips_cache
 
@@ -274,6 +292,27 @@ def map_traffic_log_row(row):
 @app.route("/", methods=["GET","POST"])
 def log_request():
     ip = get_client_ip()
+
+    # 🔥 HANDLE FRONTEND ACTION (VERY IMPORTANT)
+    data = request.get_json(silent=True)
+    if data and "action" in data:
+        action = data.get("action")
+        item = data.get("item", {})
+
+        if action == "ADD":
+            return jsonify({"message": "Item added", "item": item})
+
+        elif action == "DELETE":
+            return jsonify({"message": "Item deleted", "id": item.get("id")})
+
+        elif action == "UPDATE":
+            return jsonify({"message": "Item updated", "item": item})
+
+        return jsonify({"error": "Invalid action"}), 400
+
+    # =========================
+    # NORMAL TRAFFIC ANALYSIS
+    # =========================
     timestamp = time.time()
     method = request.method
     user_agent = request.headers.get("User-Agent", "unknown")
@@ -294,11 +333,14 @@ def log_request():
 
     if is_ip_blocked(ip):
         decision = "BLOCKED (BLACKLIST)"
+
     elif is_rate_limited(ip):
         decision = "BLOCK"
         block_ip(ip, "Rate limit exceeded")
+
     else:
         features = extract_behavior_features(ip, request_size, user_agent)
+
         features_list = [
             request_size,
             int(features["high_request_rate"]),
@@ -307,17 +349,28 @@ def log_request():
             int(features["large_payload"]),
             int(features["unusual_user_agent"])
         ]
+
         trust_score = float(predict_trust_score(features_list))
         threat_score = float(calculate_threat_score(trust_score, features))
+
         if threat_score > 0.7:
             decision = "BLOCK"
             block_ip(ip, "High threat score")
+
         elif threat_score > 0.4:
             decision = "SUSPICIOUS"
+
         else:
             decision = "ALLOW"
 
-    log = {"ip": ip, "timestamp": timestamp, "method": method, "user_agent": user_agent, "request_size": request_size}
+    log = {
+        "ip": ip,
+        "timestamp": timestamp,
+        "method": method,
+        "user_agent": user_agent,
+        "request_size": request_size
+    }
+
     save_to_db(log, features, threat_score, decision)
 
     return jsonify({
