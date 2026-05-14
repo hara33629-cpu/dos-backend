@@ -21,7 +21,7 @@ alerted_ips = set()  # ✅ prevent multiple emails per IP
 # =========================
 # DATABASE CONFIG
 # =========================
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL =" postgresql://dosdb_user:1qyPhQywwqztaa2PexPRkHUQ7AURXNQE@dpg-d83067tckfvc7389r750-a.oregon-postgres.render.com/dosdb"
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
